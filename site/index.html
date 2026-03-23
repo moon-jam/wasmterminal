@@ -198,6 +198,8 @@
       background: var(--terminal-bg);
       position: relative;
       overflow: hidden;
+      padding: 12px 16px;
+      box-sizing: border-box;
     }
 
     #terminal {
@@ -208,7 +210,6 @@
     /* Make xterm fill the container */
     .xterm {
       height: 100%;
-      padding: 12px 16px;
     }
 
     .xterm-viewport {
@@ -639,8 +640,6 @@
       updateTerminalSize(cols, rows);
 
       const term = new Terminal({
-        cols: cols,
-        rows: rows,
         cursorBlink: true,
         cursorStyle: 'block',
         fontFamily: '"JetBrains Mono", "SF Mono", "Fira Code", Menlo, Monaco, "Courier New", monospace',
@@ -678,15 +677,18 @@
 
       term.open(document.getElementById("terminal"));
 
-      // Handle window resize
-      window.addEventListener('resize', () => {
-        const newAvailableWidth = terminalWindow.clientWidth;
-        const newAvailableHeight = terminalWindow.clientHeight - titleBarHeight - statusBarHeight;
-        const newCols = Math.floor((newAvailableWidth - paddingH) / charWidth);
-        const newRows = Math.floor((newAvailableHeight - paddingV) / charHeight) - 3;
-        term.resize(newCols, newRows);
-        updateTerminalSize(newCols, newRows);
-      });
+      // Fit terminal using xterm's actual rendered cell size (same as xterm-addon-fit)
+      function fitTerminal() {
+        const dims = term._core._renderService.dimensions;
+        if (!dims || !dims.css || !dims.css.cell.width || !dims.css.cell.height) return;
+        const el = document.getElementById("terminal");
+        const cols = Math.max(2, Math.floor(el.clientWidth / dims.css.cell.width));
+        const rows = Math.max(1, Math.floor(el.clientHeight / dims.css.cell.height));
+        term.resize(cols, rows);
+        updateTerminalSize(cols, rows);
+      }
+      fitTerminal();
+      window.addEventListener('resize', fitTerminal);
 
       const log = (text) => term.write(("\x1B[2m" + text + "\x1B[0m\n").replaceAll("\n", "\r\n"));
       const console_write = (data) => term.write(data);
