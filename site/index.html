@@ -444,9 +444,10 @@
   </style>
 
   <script>
-    let wasm_linux_version = parseInt(new URLSearchParams(document.location.search).get("v") || 1);
+    let wasm_linux_version = parseInt(new URLSearchParams(document.location.search).get("v") || -1);
     wasm_linux_version = (wasm_linux_version < 0) ? (+new Date()) : wasm_linux_version;
     document.write("<link rel=\"stylesheet\" href=\"xterm.css?v=" + wasm_linux_version + "\">");
+    document.write("<script src=\"coi-serviceworker.min.js\"><\/script>");
     document.write("<script src=\"linux.js?v=" + wasm_linux_version + "\"><\/script>");
     document.write("<script src=\"xterm.js?v=" + wasm_linux_version + "\"><\/script>");
     document.write("<script src=\"net-proxy.js?v=" + wasm_linux_version + "\"><\/script>");
@@ -705,13 +706,13 @@
         await new Promise(resolve => setTimeout(resolve, 800));
 
         const worker_url = "linux-worker.js?v=" + wasm_linux_version;
-        // Fetch WASM from R2 (too large for Cloudflare Pages 25MB limit)
-        const vmlinux = await WebAssembly.compileStreaming(fetch("https://pub-2eb1d8b83528477a9b47ac7f8c23aac9.r2.dev/vmlinux.wasm"));
+        // Fetch WASM directly since GitHub Pages allows up to 100MB per file
+        const vmlinux = await WebAssembly.compileStreaming(fetch("vmlinux_wasm64_nommu.wasm?v=" + wasm_linux_version));
 
         const boot_cmdline =
-          "maxcpus=3 nohz_full=0,2-63 root=/dev/ram0 rootfstype=ramfs init=/init console=hvc console=ttyS0";
+          "maxcpus=3 nohz_full=0,2-63 root=/dev/ram0 rootfstype=ramfs init=/init console=hvc console=ttyS0 rcu_update.rcu_cpu_stall_suppress=1";
 
-        const initrd_request = await fetch("initramfs.cpio.gz?v=" + wasm_linux_version);
+        const initrd_request = await fetch("initramfs_wasm64_nommu.cpio.gz?v=" + wasm_linux_version);
         if (!initrd_request.ok) {
           throw new Error("Failed to fetch initrd: " + initrd_request.status);
         }
@@ -730,23 +731,8 @@
         const os = await linux(worker_url, vmlinux, boot_cmdline, initrd, log, console_write);
         term.onData(data => os.key_input(data));
 
-        // Initialize networking proxy
-        const WS_PROXY_URL = window.location.hostname === 'localhost'
-          ? 'ws://localhost:8080'
-          : 'wss://wasmlinux-production.up.railway.app';
-
-        if (os.initNetProxy(WS_PROXY_URL)) {
-          updateConnectionStatus('connected', 'Net: Connected');
-        } else {
-          updateConnectionStatus('warning', 'Net: Unavailable');
-        }
-
-        // Initialize filesystem persistence (IndexedDB)
-        if (await os.initFsPersist()) {
-          updateFsStatus('synced', 'FS: Synced');
-        } else {
-          updateFsStatus('warning', 'FS: Not available');
-        }
+        // Vanilla wasm-7.0 does not include network or fs persistence.
+        // We removed initNetProxy and initFsPersist to match the upstream exactly.
 
       } catch (error) {
         loadingEl.classList.add('hidden');
