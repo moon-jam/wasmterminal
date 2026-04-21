@@ -52,7 +52,7 @@
     const memory_u8 = new Uint8Array(memory.buffer);
     let end;
     for (end = index; memory_u8[end]; ++end); // Find terminating nul-character.
-    return text_decoder.decode(memory_u8.slice(Number(index), Number(end)));
+    return text_decoder.decode(memory_u8.slice(index, end));
   };
 
   const lock_notify = (lock, count) => {
@@ -144,15 +144,15 @@
         throw new Error();
       } catch (error) {
         const memory_u8 = new Uint8Array(memory.buffer);
-        const encoded = text_encoder.encode(error.stack).slice(0, Number(max_size) - 1);
-        memory_u8.set(encoded, Number(stack_trace));
-        memory_u8[Number(stack_trace) + encoded.length] = 0;
+        const encoded = text_encoder.encode(error.stack).slice(0, max_size - 1);
+        memory_u8.set(encoded, stack_trace);
+        memory_u8[stack_trace + encoded.length] = 0;
       }
     },
 
     /// Replace the currently executing image (kthread spawning init, or user process) with a new user process image.
     wasm_load_executable: (bin_start, bin_end, data_start, table_start) => {
-      user_executable = WebAssembly.compile(new Uint8Array(memory.buffer).slice(Number(bin_start), Number(bin_end)));
+      user_executable = WebAssembly.compile(new Uint8Array(memory.buffer).slice(bin_start, bin_end));
       user_executable_params = {
         data_start: data_start,
         table_start: table_start,
@@ -220,9 +220,6 @@
     // Host callbacks used by the Wasm-default console driver.
 
     wasm_driver_hvc_put: (buffer, count) => {
-      buffer = Number(buffer);
-      count = Number(count);
-
       const memory_u8 = new Uint8Array(memory.buffer);
 
       port.postMessage({
@@ -230,13 +227,10 @@
         message: text_decoder.decode(memory_u8.slice(buffer, buffer + count)),
       });
 
-      return BigInt(count);
+      return count;
     },
 
     wasm_driver_hvc_get: (buffer, count) => {
-      buffer = Number(buffer);
-      count = Number(count);
-
       // Reset lock. Using .store() for the memory barrier.
       Atomics.store(console_read_messenger, 0, -1);
 
@@ -251,7 +245,23 @@
       // Wait for a response from the main thread about how many bytes were actually written, could be 0.
       Atomics.wait(console_read_messenger, 0, -1);
       let console_read_count = Atomics.load(console_read_messenger, 0);
-      return BigInt(console_read_count);
+      return console_read_count;
+    },
+
+    // Host callbacks by the Wasm-default random number generator (added upstream in 6463f65).
+    wasm_random_get_bytes: (buffer, count) => {
+      buffer = Number(buffer);
+      count = Number(count);
+
+      if (count > 0x10000) {
+        return -1;
+      }
+
+      const data = new Uint8Array(count);
+      crypto.getRandomValues(data);
+      new Uint8Array(memory.buffer).set(data, buffer);
+
+      return count;
     },
   };
 
@@ -279,28 +289,14 @@
         },
       };
 
-      // We have to fixup unimplemented syscalls as they are declared but not defined by vmlinux (to avoid the
-      // ni_syscall soup with unimplemented syscalls, which fails on Wasm due to a variable amount of arguments). Since
-      // these syscalls should not really be called anyway, we can have a slow js stub deal with them, and it can handle
-      // variable arguments gracefully!
-      let syscall_numbers = {};
-      for (const exported of WebAssembly.Module.exports(message.vmlinux)) {
-        const name = exported.name;
-        const prefix = "__syscall_nr_";
-        if (name.startsWith(prefix) && exported.kind == "global") {
-          const syscall_name = name.substring(prefix.length, name.lastIndexOf("_"));
-          syscall_numbers[syscall_name] = parseInt(name.substring(prefix.length + syscall_name.length + 1));
-        }
-      }
-      const sys_ni_syscall_template = syscall_numbers["sys_ni_syscall"];
-
-      let ni_syscalls = [];
+      // Stub out unimplemented syscalls imported from the kernel. These syscalls return -ENOSYS and should not be
+      // called. The kernel source change to stop importing them has not landed yet; without this the runtime throws
+      // a LinkError during WebAssembly.instantiate().
+      const ni_syscall = () => { return -38 /* -ENOSYS */; };
       for (const imported of WebAssembly.Module.imports(message.vmlinux)) {
-        const name = imported.name;
-        if (name.startsWith("sys_") && imported.module == "env"
+        if (imported.name.startsWith("sys_") && imported.module == "env"
           && imported.kind == "function") {
-          import_object.env[name] = () => { throw new Error("Unimplemented syscall " + name + " called directly"); };
-          ni_syscalls.push(syscall_numbers[name]);
+          import_object.env[imported.name] = ni_syscall;
         }
       }
 
@@ -338,30 +334,22 @@
             init_task: vmlinux_instance.exports.init_task.value,
           });
 
-          // Patch up syscall table so that conditional syscalls actually map to ni_syscall.
-          // Resolve the function pointer to (=table location of) unimplemented conditional syscalls.
-          const local_view = new DataView(memory.buffer);
-          const sys_call_table = Number(vmlinux_instance.exports.sys_call_table.value);
-          const sys_ni_syscall = local_view.getBigUint64(sys_call_table + 8 * sys_ni_syscall_template, true);
-          for (const ni_syscall of ni_syscalls) {
-            local_view.setBigUint64(sys_call_table + 8 * ni_syscall, BigInt(sys_ni_syscall), true);
-          }
 
           // Setup the boot command line. We have the luxury to be able to write to it directly. The maximum length is
           // not set here but is set by COMMAND_LINE_SIZE (defaults to 512 bytes).
           const cmdline = message.boot_cmdline + "\0";
-          const cmdline_buffer = Number(vmlinux_instance.exports.boot_command_line.value);
+          const cmdline_buffer = vmlinux_instance.exports.boot_command_line.value;
           new Uint8Array(memory.buffer).set(text_encoder.encode(cmdline), cmdline_buffer);
 
           // Grow the memory to fit initrd and copy it.
           //
           // All typed arrays and views on memory.buffer become invalid by growing and need to be re-created. grow()
           // will return the old size, which becomes our base address for initrd.
-          const initrd_start = memory.grow(BigInt(((message.initrd.byteLength + 0xFFFF) / 0x10000) | 0)) * 0x10000n;
-          const initrd_end = initrd_start + BigInt(message.initrd.byteLength);
-          new Uint8Array(memory.buffer).set(new Uint8Array(message.initrd), Number(initrd_start));
-          new DataView(memory.buffer).setBigUint64(Number(vmlinux_instance.exports.initrd_start.value), initrd_start, true);
-          new DataView(memory.buffer).setBigUint64(Number(vmlinux_instance.exports.initrd_end.value), initrd_end, true);
+          const initrd_start = memory.grow(((message.initrd.byteLength + 0xFFFF) / 0x10000) | 0) * 0x10000;
+          const initrd_end = initrd_start + message.initrd.byteLength;
+          new Uint8Array(memory.buffer).set(new Uint8Array(message.initrd), initrd_start);
+          new DataView(memory.buffer).setUint32(vmlinux_instance.exports.initrd_start.value, initrd_start, true);
+          new DataView(memory.buffer).setUint32(vmlinux_instance.exports.initrd_end.value, initrd_end, true);
 
           // This will boot the maching on the primary CPU. Later on, it will boot secondaries...
           //
@@ -401,11 +389,10 @@
         user_executable_imports = {
           env: {
             memory: memory,
-            __memory_base: new WebAssembly.Global({ value: 'i64', mutable: false }, user_executable_params.data_start),
-            __stack_pointer: new WebAssembly.Global({ value: 'i64', mutable: true }, stack_pointer),
+            __memory_base: new WebAssembly.Global({ value: 'i32', mutable: false }, user_executable_params.data_start),
+            __stack_pointer: new WebAssembly.Global({ value: 'i32', mutable: true }, stack_pointer),
             __indirect_function_table: new WebAssembly.Table({ initial: 4096, element: "anyfunc" }), // TODO: fix this!
-            __table_base: new WebAssembly.Global({ value: 'i64', mutable: false }, user_executable_params.table_start),
-            __table_base32: new WebAssembly.Global({ value: 'i32', mutable: false }, Number(user_executable_params.table_start)),
+            __table_base: new WebAssembly.Global({ value: 'i32', mutable: false }, user_executable_params.table_start),
 
             // To be correct, we should save AND restore these globals between the user instance and vmlinux instance:
             // __stack_pointer <-> __user_stack_pointer
