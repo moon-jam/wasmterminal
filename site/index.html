@@ -709,12 +709,12 @@
 
         const worker_url = "linux-worker.js?v=" + wasm_linux_version;
         // Fetch WASM directly since GitHub Pages allows up to 100MB per file
-        const vmlinux = await WebAssembly.compileStreaming(fetch("vmlinux_wasm64_nommu.wasm?v=" + wasm_linux_version));
+        const vmlinux = await WebAssembly.compileStreaming(fetch("vmlinux_wasm32_nommu.wasm?v=" + wasm_linux_version));
 
         const boot_cmdline =
           "maxcpus=3 nohz_full=0,2-63 root=/dev/ram0 rootfstype=ramfs init=/init console=hvc console=ttyS0 rcu_update.rcu_cpu_stall_suppress=1";
 
-        const initrd_request = await fetch("initramfs_wasm64_nommu.cpio.gz?v=" + wasm_linux_version);
+        const initrd_request = await fetch("initramfs_wasm32_nommu.cpio.gz?v=" + wasm_linux_version);
         if (!initrd_request.ok) {
           throw new Error("Failed to fetch initrd: " + initrd_request.status);
         }
