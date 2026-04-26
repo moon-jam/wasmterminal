@@ -289,17 +289,6 @@
         },
       };
 
-      // Stub out unimplemented syscalls imported from the kernel. These syscalls return -ENOSYS and should not be
-      // called. The kernel source change to stop importing them has not landed yet; without this the runtime throws
-      // a LinkError during WebAssembly.instantiate().
-      const ni_syscall = () => { return -38 /* -ENOSYS */; };
-      for (const imported of WebAssembly.Module.imports(message.vmlinux)) {
-        if (imported.name.startsWith("sys_") && imported.module == "env"
-          && imported.kind == "function") {
-          import_object.env[imported.name] = ni_syscall;
-        }
-      }
-
       // This is a global error handler that is used when calling Wasm code.
       const wasm_error = (error) => {
         log("Wasm crash: " + error.toString());
