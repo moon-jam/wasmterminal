@@ -344,7 +344,20 @@
       font-size: 12px;
       line-height: 1.6;
       color: var(--terminal-fg);
-      min-height: 200px;
+      height: 50vh;
+      max-height: 400px;
+      overflow-y: auto;
+      scrollbar-width: thin;
+      scrollbar-color: var(--scrollbar-thumb) transparent;
+    }
+
+    .boot-messages::-webkit-scrollbar {
+      width: 6px;
+    }
+
+    .boot-messages::-webkit-scrollbar-thumb {
+      background: var(--scrollbar-thumb);
+      border-radius: 3px;
     }
 
     .boot-message {
@@ -512,21 +525,6 @@
   </div>
 
   <script>
-    // Boot sequence messages
-    const bootMessages = [
-      { text: '[    0.000000] Linux version 6.1.0-wasm', delay: 100 },
-      { text: '[    0.000000] Command line: maxcpus=3 root=/dev/ram0', delay: 150, class: 'dim' },
-      { text: '[    0.001234] CPU: WebAssembly virtual processor', delay: 200 },
-      { text: '[    0.002000] Memory: 256MB available', delay: 250 },
-      { text: '[    0.003500] <span class="ok">[  OK  ]</span> Mounted devtmpfs', delay: 400 },
-      { text: '[    0.004200] <span class="ok">[  OK  ]</span> Started udev daemon', delay: 500 },
-      { text: '[    0.005100] <span class="info">[INFO ]</span> Initializing network stack...', delay: 650 },
-      { text: '[    0.006000] <span class="ok">[  OK  ]</span> Network interface configured', delay: 800 },
-      { text: '[    0.007500] <span class="info">[INFO ]</span> Loading initramfs...', delay: 950 },
-      { text: '[    0.009000] <span class="ok">[  OK  ]</span> Filesystem mounted', delay: 1100 },
-      { text: '[    0.010000] <span class="ok">[  OK  ]</span> Starting init process...', delay: 1300 },
-    ];
-
     // Status bar update functions
     function updateTime() {
       const now = new Date();
@@ -580,32 +578,14 @@
       }
     }
 
-    // Boot animation
-    async function runBootSequence() {
+    // Append a single line to the loading-screen boot log
+    function appendBootMessage(text, cls) {
       const messagesEl = document.getElementById('boot-messages');
-      const progressBar = document.getElementById('boot-progress');
-      
-      for (let i = 0; i < bootMessages.length; i++) {
-        const msg = bootMessages[i];
-        await new Promise(resolve => setTimeout(resolve, msg.delay - (i > 0 ? bootMessages[i-1].delay : 0)));
-        
-        const msgEl = document.createElement('div');
-        msgEl.className = 'boot-message' + (msg.class ? ' ' + msg.class : '');
-        msgEl.innerHTML = msg.text;
-        messagesEl.appendChild(msgEl);
-        
-        // Update progress
-        const progress = ((i + 1) / bootMessages.length) * 100;
-        progressBar.style.width = progress + '%';
-        
-        // Auto-scroll
-        messagesEl.scrollTop = messagesEl.scrollHeight;
-      }
-      
-      // Add blinking cursor at end
-      const cursorEl = document.createElement('span');
-      cursorEl.className = 'boot-cursor';
-      messagesEl.appendChild(cursorEl);
+      const msgEl = document.createElement('div');
+      msgEl.className = 'boot-message' + (cls ? ' ' + cls : '');
+      msgEl.innerHTML = text;
+      messagesEl.appendChild(msgEl);
+      messagesEl.scrollTop = messagesEl.scrollHeight;
     }
 
     // Update time every second
@@ -617,8 +597,6 @@
       const terminalContainer = document.getElementById("terminal-container");
       const terminalWindow = document.querySelector(".terminal-window");
 
-      // Start boot animation
-      runBootSequence();
 
       // Calculate terminal size based on available space
       // Font size 14px with lineHeight 1.2 = ~17px per line, but actual rendering adds a bit more
@@ -691,7 +669,37 @@
       window.addEventListener('resize', fitTerminal);
 
       const log = (text) => term.write(("\x1B[2m" + text + "\x1B[0m\n").replaceAll("\n", "\r\n"));
-      const console_write = (data) => term.write(data);
+
+      // Mirror kernel console output to the loading overlay until shell is ready
+      let bootFinished = false;
+      let bootBuffer = '';
+      const bootProgressBar = document.getElementById('boot-progress');
+      function finishBoot() {
+        if (bootFinished) return;
+        bootFinished = true;
+        bootProgressBar.style.width = '100%';
+        loadingEl.classList.add('hidden');
+        term.focus();
+      }
+      function mirrorBootOutput(data) {
+        // Strip ANSI escape codes for the HTML pane
+        bootBuffer += data.replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '');
+        let idx;
+        while ((idx = bootBuffer.search(/\r?\n/)) !== -1) {
+          const line = bootBuffer.slice(0, idx);
+          bootBuffer = bootBuffer.slice(idx + (bootBuffer[idx] === '\r' && bootBuffer[idx + 1] === '\n' ? 2 : 1));
+          if (line) appendBootMessage(line);
+        }
+        // Nudge progress bar while boot messages flow in
+        const w = parseFloat(bootProgressBar.style.width) || 30;
+        if (w < 90) bootProgressBar.style.width = (w + 2) + '%';
+        // Hide loading once the shell prompt appears
+        if (/[#$]\s*$/.test(bootBuffer)) finishBoot();
+      }
+      const console_write = (data) => {
+        term.write(data);
+        if (!bootFinished) mirrorBootOutput(data);
+      };
 
       // Check for SharedArrayBuffer support
       if (!window.crossOriginIsolated) {
@@ -704,34 +712,34 @@
       }
 
       try {
-        // Wait for boot animation to progress a bit before starting actual loading
-        await new Promise(resolve => setTimeout(resolve, 800));
-
         const worker_url = "linux-worker.js?v=" + wasm_linux_version;
-        // Fetch WASM directly since GitHub Pages allows up to 100MB per file
+
+        appendBootMessage('<span class="info">[INFO ]</span> Fetching kernel...');
+        bootProgressBar.style.width = '10%';
         const vmlinux = await WebAssembly.compileStreaming(fetch("vmlinux_wasm32_nommu.wasm?v=" + wasm_linux_version));
+        appendBootMessage('<span class="ok">[  OK  ]</span> Kernel compiled');
+        bootProgressBar.style.width = '40%';
 
         const boot_cmdline =
           "maxcpus=3 nohz_full=0,2-63 root=/dev/ram0 rootfstype=ramfs init=/init console=hvc console=ttyS0 rcu_update.rcu_cpu_stall_suppress=1";
 
+        appendBootMessage('<span class="info">[INFO ]</span> Fetching initramfs...');
         const initrd_request = await fetch("initramfs_wasm32_nommu.cpio.gz?v=" + wasm_linux_version);
         if (!initrd_request.ok) {
           throw new Error("Failed to fetch initrd: " + initrd_request.status);
         }
         const initrd = await initrd_request.arrayBuffer();
+        appendBootMessage('<span class="ok">[  OK  ]</span> Initramfs loaded');
+        bootProgressBar.style.width = '60%';
 
-        // Wait for boot animation to complete
-        await new Promise(resolve => setTimeout(resolve, 600));
-
-        // Hide loading screen and show terminal
-        loadingEl.classList.add('hidden');
-        term.focus();
-
-        // Update status
         updateConnectionStatus('connected', 'Running');
 
+        appendBootMessage('<span class="info">[INFO ]</span> Booting Linux...');
         const os = await linux(worker_url, vmlinux, boot_cmdline, initrd, log, console_write);
         term.onData(data => os.key_input(data));
+
+        // Safety: hide loading after 15s even if prompt detection fails
+        setTimeout(finishBoot, 15000);
 
         // Vanilla wasm-7.0 does not include network or fs persistence.
         // We removed initNetProxy and initFsPersist to match the upstream exactly.
